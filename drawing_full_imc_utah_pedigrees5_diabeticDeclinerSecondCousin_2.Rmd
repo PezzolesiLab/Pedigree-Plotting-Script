@@ -1,0 +1,227 @@
+---
+title: "Generating Pedigrees for Trimmed Intermountain, Utah Slope Pedigrees, < -5"
+subtitle: "Report to: Marcus Pezzolesi"
+author: Scott Frodsham
+date: "`r format(Sys.time(), '%d %B, %Y')`"
+geometry: margin=1cm
+output:
+  pdf_document:
+    latex_engine: xelatex
+    highlight: "default"
+mainfont: Arial
+monofont: Monaco
+fontsize: 11pt
+toc: yes
+---
+
+# Introduction
+
+We have large pedigrees that have anuy diabetic and slow decliner that is related to a rapid decliner.
+
+```{r load ped file}
+library(tidyverse)
+
+families <- read_csv("~/Documents/Projects/eGFR/EDW_IHC_RFD_Pedigrees/20190717DavidMarcusM5Pedigree/mappingDiabetics/all_secondCousinDiabeticDecliner_peds.csv", col_names = c("kindredID", "egoUPDBID", "paUPDBID", "maUPDBID", "sex", "deceased", "updb_id", "dist_id"))
+```
+
+We attempt to make a pedigree object again:
+
+```{r make bigped 3}
+pedList <- pedigree(famid = families$kindredID, id = families$egoUPDBID, dad = families$paUPDBID, mom = families$maUPDBID, sex = families$sex, status = families$deceased)
+#write_csv(families, "~/Documents/Projects/eGFR/EDW_IHC_RFD_Pedigrees/20190717DavidMarcusM5Pedigree/mappingDiabetics/kinship2_ready_pedigree_dm.csv")
+
+famNumList <- unique(families$kindredID)
+
+#plotGenericPeds <- function(x) {
+#  pedigree <- pedList[as.character(x)]
+#  pdf(paste0("/Users/u6013142/Documents/Projects/eGFR/EDW_IHC_RFD_Pedigrees/20190717DavidMarcusM5Pedigree/mappingDiabetics/allSeparatePedPlots/", x, ".pdf"), width = 24, height = 12)
+#  plot.pedigree(pedigree, id = rep("", length(pedigree$famid), cex = 0.4, symbolsize = 1))
+#  mtext(paste0("Family ", x), line = 2, adj = 0, cex = 1.5)
+#  dev.off()
+#}
+#
+#lapply(famNumList, plotGenericPeds)
+```
+
+It worked! Before drawing the pedigrees, we want to add bring in some clinical information:
+
+```{r import clinical data, message=FALSE, error=FALSE}
+slopes <- read_csv("/Users/u6013142/Documents/Projects/eGFR/EDW_IHC_RFD_Pedigrees/medical_data/all_uddb_slopes.csv")
+diags <- read_csv("/Users/u6013142/Documents/Projects/eGFR/EDW_IHC_RFD_Pedigrees/medical_data/all_uddb_diagnoses.csv")
+egfr <- read_csv("/Users/u6013142/Documents/Projects/eGFR/EDW_IHC_RFD_Pedigrees/medical_data/uddb_egfrs_102219.csv")
+sum(unique(slopes$Patient_ID) %in% unique(egfr$Patient_ID))
+acr <- read_csv("/Users/u6013142/Documents/Projects/eGFR/EDW_IHC_RFD_Pedigrees/medical_data/uddb_acrs.csv")
+acr <- acr %>% filter(!is.na(OBS_VALUE))
+acr$RESULT_DTM <- as.Date(acr$RESULT_DTM, format = "%m/%d/%Y")
+patientIDs <- read_csv("/Users/u6013142/Documents/Projects/eGFR/EDW_IHC_RFD_Pedigrees/medical_data/uddb_patientIDs.csv", col_types = "cicc")
+# used to keep duplicates with this method but we're just going to delete them
+#collapsed_patientIDs <- patientIDs %>% group_by(Patient_ID) %>% fill(DIST_ID, UPDB_ID) %>% fill(DIST_ID, UPDB_ID, .direction = 'up') %>% distinct()
+#collapsed_patientIDs <- collapsed_patientIDs %>% distinct(Patient_ID, .keep_all = TRUE)
+```
+
+We make the patientIDs dataframe useful, getting rid of the `DIST_` and `UPDB_` prefixes also remove `NA` suffixes, we remove duplicates:
+
+```{r process patientIDs}
+#patientIDs_patid <- as_tibble(str_split(patientIDs$Patient_ID, "N", simplify = TRUE))
+#names(patientIDs_patid) <- c("id", "a")
+patientIDs_updb <- as_tibble(str_split(patientIDs$UPDB_ID, "_", simplify = TRUE))
+names(patientIDs_updb) <- c("updb", "id")
+patientIDs_dist <- as_tibble(str_split(patientIDs$DIST_ID, "_", simplify = TRUE))
+names(patientIDs_dist) <- c("dist", "id")
+
+patientIDs$UPDB_ID <- ifelse(is.na(patientIDs_updb$updb), NA, patientIDs_updb$id)
+patientIDs$DIST_ID <- ifelse(is.na(patientIDs_dist$dist), NA, patientIDs_dist$id)
+#patientIDs$Patient_ID <- patientIDs_patid$id
+
+patientID_dups <- patientIDs$Patient_ID[duplicated(patientIDs$Patient_ID)]
+patientIDs <- patientIDs %>% filter(!Patient_ID %in% patientID_dups)
+```
+
+We need to make a table that indicates the first and last eGFR for each patient:
+
+```{r first last egfr}
+egfr_last <- egfr %>% group_by(Patient_ID) %>% summarize(last_egfr = EGFR[which.max(RESULT_DTM)])
+acr_last <- acr %>% group_by(Patient_ID) %>% summarize(last_acr = OBS_VALUE[which.max(RESULT_DTM)])
+```
+
+We join these values into one table:
+
+```{r remove prefixes}
+diags <- left_join(diags, patientIDs[ , c(1,2)])
+slopes <- left_join(slopes, patientIDs[ , c(1,2)])
+egfr_last_join <- left_join(egfr_last, patientIDs[ , c(1,2)])
+acr_last <- left_join(acr_last, patientIDs[ , c(1,2)])
+```
+
+We need to filter some of these diagnoses down so that we're only dealing with the ones we need. First we process diabetes type:
+
+```{r process dm}
+dmType <- read_csv("~/Documents/Projects/eGFR/EDW_IHC_RFD_Pedigrees/20190717DavidMarcusM5Pedigree/mappingDiabetics/uddb_data/uddb_ids_dmTypes.csv")
+
+dmType_patid <- as_tibble(str_split(dmType$Patient_ID, "N", simplify = TRUE))
+names(dmType_patid) <- c("id", "a")
+dmType_updb <- as_tibble(str_split(dmType$UPDB_ID, "_", simplify = TRUE))
+names(dmType_updb) <- c("updb", "id")
+dmType_dist <- as_tibble(str_split(dmType$DIST_ID, "_", simplify = TRUE))
+names(dmType_dist) <- c("dist", "id")
+
+dmType$UPDB_ID <- ifelse(is.na(dmType_updb$updb), NA, dmType_updb$id)
+dmType$DIST_ID <- ifelse(is.na(dmType_dist$dist), NA, dmType_dist$id)
+dmType$Patient_ID <- dmType_patid$id
+
+dmType_dups <- dmType$Patient_ID[duplicated(dmType$Patient_ID)]
+dmType <- dmType %>% filter(!Patient_ID %in% dmType_dups)
+
+dmType$CleanFinalType <- ifelse(grepl("T2D", dmType$FinalType) | grepl("T3D", dmType$FinalType), 2, 1)
+rm(patientIDs_dist, patientIDs_patid, patientIDs_updb, dmType_dist, dmType_patid, dmType_updb, patientID_dups, dmType_dups)
+```
+
+Now the rest of the diagnoses:
+
+```{r filter diags}
+# with aki
+#esrd_diags <- diags %>% filter(ICD_CODE %in% c("584.9", "N17.9", "Z99.2", "V45.11", "585.6", "N18.6", "V42.0", "Z94.0"))
+# without aki
+esrd_diags <- diags %>% filter(ICD_CODE %in% c("Z99.2", "V45.11", "585.6", "N18.6", "V42.0", "Z94.0"))
+esrd_list <- unique(esrd_diags$Patient_ID)
+
+esrd_below_15 <- slopes %>% filter(CutoffEvent == "BELOW_15")
+esrd_below_15_list <- unique(esrd_below_15$Patient_ID)
+
+esrd_list <- unique(c(as.character(esrd_list), as.character(esrd_below_15_list)))
+
+dmType$esrd <- ifelse(dmType$Patient_ID %in% esrd_list, "ESRD", "")  
+slope_esrd_diabetes <- left_join(dmType, slopes[ , c(1,4)])
+
+slope_esrd_diabetes_lastacr <- left_join(slope_esrd_diabetes, acr_last)
+slope_esrd_dm_lastacr_lastegfr <- left_join(slope_esrd_diabetes_lastacr, egfr_last)
+
+families$egoUPDBID <- as.character(families$egoUPDBID)
+families_phenos <- left_join(families, slope_esrd_dm_lastacr_lastegfr, by = c("egoUPDBID" = "Patient_ID"))
+families_phenos$Slope[families_phenos$Slope == "Rejected"] <- NA
+families_phenos$Slope <- as.numeric(families_phenos$Slope)
+
+families_phenos$rapidDecliner <- ifelse(families_phenos$Slope <= -5, 1, 0)
+# add esrd affection line here
+families_phenos$updb_id <- ifelse(is.na(families_phenos$updb_id), families_phenos$UPDB_ID, families_phenos$updb_id)
+families_phenos$dist_id <- ifelse(is.na(families_phenos$dist_id), families_phenos$DIST_ID, families_phenos$dist_id)
+
+write_csv(families_phenos, "~/Documents/Projects/eGFR/EDW_IHC_RFD_Pedigrees/20190717DavidMarcusM5Pedigree/mappingDiabetics/460_full_secondCousinDiabeticDecliner_pyTrimmed_peds_kinship_pheno_ready.csv")
+```
+
+Now we draw the pedigrees:
+
+```{r draw pedigrees}
+# make a list of the families
+families_phenos <- read_csv("~/Documents/Projects/eGFR/EDW_IHC_RFD_Pedigrees/20190717DavidMarcusM5Pedigree/mappingDiabetics/460_full_secondCousinDiabeticDecliner_pyTrimmed_peds_kinship_pheno_ready.csv")
+
+famList <- unique(as.character(families_phenos$kindredID))
+
+pedList <- pedigree(famid = families_phenos$kindredID, id = families_phenos$egoUPDBID, dad = families_phenos$paUPDBID, mom = families_phenos$maUPDBID, sex = families_phenos$sex, status = families_phenos$deceased, affected = families_phenos$rapidDecliner, missid = 0)
+
+plotSepPedsColor <- function(x) {
+  #x <- 584
+  fullInfo <- families_phenos %>% filter(kindredID == x)
+  print(x)
+  fullInfo$color <- ifelse(is.na(fullInfo$updb_id) & is.na(fullInfo$dist_id), 1,
+                          ifelse(!is.na(fullInfo$updb_id) & !is.na(fullInfo$dist_id), 3, 
+                          ifelse(!is.na(fullInfo$updb_id) & is.na(fullInfo$dist_id), 4,
+                          ifelse(is.na(fullInfo$updb_id) & !is.na(fullInfo$dist_id), 2,5))))
+                          #ifelse(fullInfo$dist_id %in% ngs_overlap$dist_id, 5, 6)))))
+  pedigree <- pedList[as.character(x)]
+  pdf(paste0("/Users/u6013142/Documents/Projects/eGFR/EDW_IHC_RFD_Pedigrees/20190717DavidMarcusM5Pedigree/mappingDiabetics/allSeparatePedPlots/", x, ".pdf"), width = 24, height = 12)
+  #listOfIdsDM <- ifelse(is.na(fullInfo$CleanFinalType), "", fullInfo$egoUPDBID)
+  listOfIds <- ifelse(is.na(fullInfo$Slope) & is.na(fullInfo$CleanFinalType), 
+                      "", 
+                      ifelse(is.na(fullInfo$Slope) & !is.na(fullInfo$CleanFinalType),
+                             paste0(fullInfo$updb_id, "\n", fullInfo$dist_id, "\n", fullInfo$CleanFinalType, "\n", fullInfo$esrd), 
+                             ifelse(!is.na(fullInfo$Slope) & !is.na(fullInfo$esrd), 
+                                    paste0(fullInfo$updb_id, "\n", fullInfo$dist_id, "\n", fullInfo$CleanFinalType, "\n", fullInfo$last_egfr, "\n", fullInfo$Slope, "\n", fullInfo$last_acr, "\n", fullInfo$esrd), 
+                                    paste0(fullInfo$updb_id, "\n", fullInfo$dist_id, "\n", fullInfo$CleanFinalType, "\n", fullInfo$last_egfr, "\n", fullInfo$Slope, "\n", fullInfo$last_acr))))
+  #listOfIds <- ifelse(is.na(fullInfo$Slope), 
+  #                    "", 
+  #                    ifelse(!is.na(fullInfo$esrd), 
+  #                           paste0(fullInfo$updb_id, "\n", fullInfo$dist_id, "\n", fullInfo$CleanFinalType, "\n", fullInfo$last_egfr, "\n", fullInfo$Slope, "\n", fullInfo$last_acr, "\n", fullInfo$esrd), 
+  #                           paste0(fullInfo$updb_id, "\n", fullInfo$dist_id, "\n", fullInfo$CleanFinalType, "\n", fullInfo$last_egfr, "\n", fullInfo$Slope, "\n", fullInfo$last_acr)))
+  fullInfo$rapidDecliner <- ifelse(!is.na(fullInfo$esrd), 1, fullInfo$rapidDecliner)
+  plot.pedigree(pedigree, id = listOfIds, col = fullInfo$color, affected = fullInfo$rapidDecliner, cex = 0.5, symbolsize = 1.75)
+  mtext(paste0("Family ", x), line = 2, adj = 0, cex = 1.5)
+  dev.off()
+}
+
+#pdf(paste0("/Users/u6013142/Documents/Projects/eGFR/EDW_IHC_RFD_Pedigrees/20190717DavidMarcusM5Pedigree/mappingDiabetics/460_pedigreePlots.pdf"), width = 24, height = 12)
+lapply(famList, plotSepPedsColor)
+#dev.off()
+
+# Only veryLegible families
+veryLegibleFamIds <- scan("/Users/u6013142/Documents/Projects/eGFR/EDW_IHC_RFD_Pedigrees/20190717DavidMarcusM5Pedigree/mappingDiabetics/veryLegibleFamIds_slowDeclinersAndDM_phi0156.csv")
+illegibleFamIds <- famList[!famList %in% veryLegibleFamIds]
+write.table(illegibleFamIds, "/Users/u6013142/Documents/Projects/eGFR/EDW_IHC_RFD_Pedigrees/20190717DavidMarcusM5Pedigree/mappingDiabetics/illegibleFamIds_211_slowDeclinersAndDM_phi0156.csv", row.names = FALSE, col.names = FALSE, quote = FALSE)
+
+pdf(paste0("/Users/u6013142/Documents/Projects/eGFR/EDW_IHC_RFD_Pedigrees/20190717DavidMarcusM5Pedigree/mappingDiabetics/249_veryLegiblePedigreePlots.pdf"), width = 24, height = 12)
+lapply(veryLegibleFamIds, plotSepPedsColor)
+dev.off()
+
+pdf(paste0("/Users/u6013142/Documents/Projects/eGFR/EDW_IHC_RFD_Pedigrees/20190717DavidMarcusM5Pedigree/mappingDiabetics/211_illegiblePedigreePlots.pdf"), width = 24, height = 12)
+lapply(illegibleFamIds, plotSepPedsColor)
+dev.off()
+
+#families_phenos_sum_5 <- families_phenos %>% group_by(kindredID) %>% summarize(n = n())
+#
+#plotSepPedsColorAllTogether <- function(x) {
+#  fullInfo <- families_phenos %>% filter(kindredID == x)
+#  fullInfo$color <- ifelse(is.na(fullInfo$updb_id) & is.na(fullInfo$dist_id), 1,
+#                          ifelse(!is.na(fullInfo$updb_id) & !is.na(fullInfo$dist_id), 3, 
+#                          ifelse(!is.na(fullInfo$updb_id) & is.na(fullInfo$dist_id), 4,
+#                          ifelse(is.na(fullInfo$updb_id) & !is.na(fullInfo$dist_id), 2, 5))))
+#  pedigree <- pedList[x]
+#  plot.pedigree(pedigree, id = ifelse(is.na(fullInfo$UPDB_dist_id), "", paste0(fullInfo$updb_id, "\n", fullInfo$dist_id, "\n", fullInfo$TYPE_1OR2, "\n", fullInfo$last_egfr, "\n", fullInfo$Slope, "\n", fullInfo$last_acr, "\n", fullInfo$esrd)),
+#                          col = fullInfo$color, affected = fullInfo$affection, cex = 0.45, symbolsize = 1)
+#  mtext(paste0("Family ", x), line = 2, adj = 0, cex = 1.5)
+#}
+#
+## this vvvvv needs to be run in a vanilla R script (not an Rmd)
+#pdf(paste0("/Users/u6013142/Documents/Projects/eGFR/EDW_IHC_RFD_Pedigrees/20190717DavidMarcusM5Pedigree/pedigree_M5_trimmed.pdf"), width = 14, height = 6)
+#lapply(famList, plotSepPedsColorAllTogether)
+#dev.off()
+```

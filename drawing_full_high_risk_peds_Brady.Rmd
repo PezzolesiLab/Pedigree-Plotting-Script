@@ -1,0 +1,498 @@
+---
+title: "drawing_full_high_risk_peds"
+output: html_document
+---
+
+## Load packages and pedigree file, set working dir
+
+```{r setup}
+library(kinship2)
+library(tidyverse)
+library(knitr)
+library(reticulate)
+
+setwd('Y:/IRB_00096551/UPDB_Pedigrees_10_2021/TrimmedPedigree')
+
+# Load pedigree file
+families <- read_csv('David_Marcus_ICDRenal_ALL_T_20211011.txt')
+fullPed <- families
+```
+
+We change some of the encodings so that `kinship2` will accept them:
+
+```{r change encoding}
+families$sex[families$sex == "M"] <- "male"
+families$sex[families$sex == "F"] <- "female"
+families$sex[families$sex == "U"] <- "unknown"
+
+families$affection[families$affection == 1] <- 0
+families$affection[families$affection == 10] <- 1
+
+families$deceased <- families$DYr
+families$deceased[!is.na(families$DYr)] <- 1
+families$deceased[is.na(families$DYr)] <- 0
+
+families$paUPDBID[is.na(families$paUPDBID)] <- 0
+families$maUPDBID[is.na(families$maUPDBID)] <- 0
+```
+
+We will only keep the columns we need to create the pedigree:
+
+```{r keep essential cols}
+families <- families %>% select(kindredID, egoUPDBID, paUPDBID, maUPDBID, sex, deceased, affection)
+#families <- families %>% filter(KindredID == 562503)
+```
+
+We attempt to make a pedigree object:
+
+```{r make pedigree object}
+#bigped <- pedigree(famid = families$kindredID, id = families$egoUPDBID, dad = families$paUPDBID, mom = families$maUPDBID, sex = families$sex, status = families$deceased, affected = families$affection)
+```
+
+So it looks like there are individuals who show up as parents, but not individuals (no egoUPDBID, etc),
+lets create a new row for each of them. Lets save what we have as a tsv then open it in python.
+
+```{r save file as tsv}
+# if we try to save large numeric types scientific notation is introduced, so we change them to integers
+families <- families %>% mutate_if(is.numeric, as.integer)
+write_delim(families, "Z:/temp/full_high_risk_ped.tsv", delim = "\t")
+```
+
+The following script is used to identify lists of fathers and mothers who do not have their 'own' line (in which their ID is in the `egoUPDBID` column):
+
+```{python add missing parents}
+with open('Z:/temp/full_high_risk_ped.tsv') as full_fam_ped:
+    full_fam_ped.readline()
+    egoDict = {}
+    momDict = {}
+    dadDict = {}
+    for line in full_fam_ped:
+        line = line.strip().split("\t")
+        family = int(line[0])
+        ego = int(line[1])
+        dad = int(line[2])
+        mom = int(line[3])
+        if ego != 0:
+            if ego not in egoDict:
+                egoDict[ego] = [family]
+            else:
+                egoDict[ego].append(family)
+        if dad != 0:
+            if dad not in dadDict:
+                dadDict[dad] = [family]
+            else:
+                dadDict[dad].append(family)
+        if mom != 0:
+            if mom not in momDict:
+                momDict[mom] = [family]
+            else:
+                momDict[mom].append(family)
+    missingDads = []
+    missingMoms = []
+    for mom, fams in momDict.items():
+        for fam in fams:
+            if mom in egoDict:
+                if fam not in egoDict[mom]:
+                    missingMom = [mom, fam]
+                    missingMoms.append(missingMom)
+            else:
+                missingMom = [mom, fam]
+                missingMoms.append(missingMom)
+        
+    for dad, fams in dadDict.items():
+        for fam in fams:
+            if dad in egoDict:
+                if fam not in egoDict[dad]:
+                    missingDad = [dad, fam]
+                    missingDads.append(missingDad)
+            else:
+                missingDad = [dad, fam]
+                missingDads.append(missingDad)
+```
+
+We use the lists created by the python script to create new rows. We then append it to our `full_families` dataframe:
+
+```{r create entries}
+missingDads <- py$missingDads
+missingMoms <- py$missingMoms
+egoDict <- py$egoDict
+momDict <- py$momDict
+dadDict <- py$dadDict
+
+missingParents <- function(x, y) {
+  data.frame(
+    kindredID = x[2],
+    egoUPDBID = x[1],
+    paUPDBID = 0,
+    maUPDBID = 0,
+    sex = y,
+    deceased = 1,
+    affection = NA,
+    stringsAsFactors = FALSE)
+}
+
+if (length(missingDads) > 0) {
+  dadRows <- lapply(missingDads, missingParents, "male")
+  dadDF <- do.call(rbind, dadRows)
+  dadsReady <- TRUE
+} else {
+  dadsReady <- FALSE
+}
+
+if (length(missingMoms) > 0) {
+  momRows <- lapply(missingMoms, missingParents, "female")
+  momDF <- do.call(rbind, momRows)
+  momsReady <- TRUE
+} else {
+  momsReady <- FALSE
+}
+
+if (momsReady & dadsReady) {
+  full_families_dads <- rbind(families, dadDF)
+  full_families_moms_dads <- rbind(full_families_dads, momDF)
+  families <- full_families_moms_dads %>% mutate_if(is.numeric, as.integer)
+} else if (momsReady & !dadsReady) {
+  full_families_moms <- rbind(families, momDF)
+  families <- full_families_moms %>% mutate_if(is.numeric, as.integer)
+} else if (!momsReady & dadsReady) {
+  full_families_dads <- rbind(families, dadDF)
+  families <- full_families_dads %>% mutate_if(is.numeric, as.integer)
+}
+```
+
+We attempt to make a pedigree again:
+
+```{r make ped 2, eval=FALSE}
+#bigped <- pedigree(famid = families$kindredID, id = families$egoUPDBID, dad = families$paUPDBID, mom = families$maUPDBID, sex = families$sex, status = families$deceased, affected = families$affection)
+```
+
+So it looks like some individuals are missing a parent. We need to create a record for those parents:
+
+```{r id missing one parent}
+missing_a_parent <- families %>% filter((paUPDBID != 0 & maUPDBID == 0) | (paUPDBID == 0 & maUPDBID != 0))
+both_parents_present <- families %>% filter((paUPDBID == 0 & maUPDBID == 0) | (paUPDBID != 0 & maUPDBID != 0))
+```
+
+First, we'll give these people a parent by filling the zeros in `paUPDBID` column with negative numbers:
+
+```{r fill in zeros}
+# start here tomorrow, it needs to be do negative numbers on the mothers too
+if (0 %in% as.integer(missing_a_parent$paUPDBID)) {
+  missing_a_dad <- missing_a_parent %>% filter(paUPDBID == 0)
+  missing_a_dad$paUPDBID <- -seq(1:nrow(missing_a_dad))
+}
+if (0 %in% as.integer(missing_a_parent$maUPDBID)) {
+  missing_a_mom <- missing_a_parent %>% filter(maUPDBID == 0)
+  missing_a_mom$maUPDBID <- -seq( 1:nrow(missing_a_mom))
+}
+```
+
+Now we add them back to our dataset:
+
+```{r missing and both}
+families <- rbind(both_parents_present, missing_a_dad)
+#families <- rbind(families, missing_a_mom)
+```
+
+Now we can reuse the above chunks of code to give these 'new' individuals their own records. First, we save what we have so far:
+
+```{r save progress 2}
+# if we try to save large numeric types scientific notation is introduced, so we change them to integers
+families <- families %>% mutate_if(is.numeric, as.integer)
+write_delim(families, "Z:/temp/parentsAdded_full_562503.tsv", delim = "\t")
+```
+
+DUPLICATED CODE BELOW: The following script is used to identify lists of fathers and mothers who do not have their 'own' line (in which their ID is in the `egoUPDBID` column):
+
+```{python add missing parents}
+with open('Z:/temp/parentsAdded_full_562503.tsv') as full_fam_ped:
+    full_fam_ped.readline()
+    egoDict = {}
+    momDict = {}
+    dadDict = {}
+    for line in full_fam_ped:
+        line = line.strip().split("\t")
+        family = int(line[0])
+        ego = int(line[1])
+        dad = int(line[2])
+        mom = int(line[3])
+        if ego != 0:
+            if ego not in egoDict:
+                egoDict[ego] = [family]
+            else:
+                egoDict[ego].append(family)
+        if dad != 0:
+            if dad not in dadDict:
+                dadDict[dad] = [family]
+            else:
+                dadDict[dad].append(family)
+        if mom != 0:
+            if mom not in momDict:
+                momDict[mom] = [family]
+            else:
+                momDict[mom].append(family)
+    missingDads = []
+    missingMoms = []
+    for mom, fams in momDict.items():
+        for fam in fams:
+            if mom in egoDict:
+                if fam not in egoDict[mom]:
+                    missingMom = [mom, fam]
+                    missingMoms.append(missingMom)
+            else:
+                missingMom = [mom, fam]
+                missingMoms.append(missingMom)
+        
+    for dad, fams in dadDict.items():
+        for fam in fams:
+            if dad in egoDict:
+                if fam not in egoDict[dad]:
+                    missingDad = [dad, fam]
+                    missingDads.append(missingDad)
+            else:
+                missingDad = [dad, fam]
+                missingDads.append(missingDad)
+```
+
+MORE DUPLICATED CODE: We use the lists created by the python script to create new rows. We then append it to our `families` dataframe:
+
+```{r create entries}
+missingDads2 <- py$missingDads
+missingMoms2 <- py$missingMoms
+# no new moms to add!
+
+missingParents <- function(x, y) {
+  data.frame(
+    kindredID = x[2],
+    egoUPDBID = x[1],
+    paUPDBID = 0,
+    maUPDBID = 0,
+    sex = y,
+    deceased = 1,
+    affection = NA,
+    stringsAsFactors = FALSE)
+}
+
+#adRows2 <- lapply(missingDads2, missingParents, "male")
+#adDF2 <- do.call(rbind, dadRows2)
+
+#23_families_dads2 <- rbind(full_families, dadDF2)
+
+#full_families <- full_families_dads2 %>% mutate_if(is.numeric, as.integer)
+if (length(missingDads2) > 0) {
+  dadRows2 <- lapply(missingDads2, missingParents, "male")
+  dadDF2 <- do.call(rbind, dadRows2)
+  dadsReady <- TRUE
+} else {
+  dadsReady <- FALSE
+}
+
+if (length(missingMoms2) > 0) {
+  momRows2 <- lapply(missingMoms2, missingParents, "female")
+  momDF2 <- do.call(rbind, momRows2)
+  momsReady <- TRUE
+} else {
+  momsReady <- FALSE
+}
+
+if (momsReady & dadsReady) {
+  full_families_dads2 <- rbind(families, dadDF2)
+  full_families_moms_dads2 <- rbind(full_families_dads2, momDF2)
+  families <- full_families_moms_dads2 %>% mutate_if(is.numeric, as.integer)
+} else if (momsReady & !dadsReady) {
+  full_families_moms2 <- rbind(families, momDF2)
+  families <- full_families_moms2 %>% mutate_if(is.numeric, as.integer)
+} else if (!momsReady & dadsReady) {
+  full_families_dads2 <- rbind(families, dadDF2)
+  families <- full_families_dads2 %>% mutate_if(is.numeric, as.integer)
+}
+```
+
+We attempt to make a pedigree object again:
+
+```{r make ped 3}
+families <- distinct(families)
+
+families$affection[is.na(families$affection)] <- 0
+count <- families %>% group_by(kindredID) %>% summarise(counts = n(), countsAffected = sum(affection))
+
+pedList <- pedigree(famid = families$kindredID, id = families$egoUPDBID, dad = families$paUPDBID, mom = families$maUPDBID, sex = families$sex, status = families$deceased, affected = families$affection)
+
+write_csv(families, "Z:/temp/kinship2_ready_pedigree.csv")
+```
+
+It worked! Now we draw the pedigree, inserting the kindredID in the brackets following
+pedList
+
+```{r draw pedigrees}
+
+pedigree <- pedList["175031"]
+
+# Does not plot in color
+#tiff("Z:/temp/drawn_peds/562503.tiff", units = "in", width = 90, height = 10, res = 300)
+#plot.pedigree(pedigree)
+#dev.off()
+
+```
+
+Works well up to this point currently...
+Add additional info slope, egfr, etc to `fullPed` and plot in color
+
+```{r add additional info to ped}
+# load pedigree
+preparedPed <- read_csv("Z:/temp/kinship2_ready_pedigree.csv")
+
+# load phenotype data from files. Data can also be read in directly from the database using the RODBC package
+allDiags <- read_csv("Y:/IRB_00096551/UDDB_Table_Files_For_Plotting_2021/uddb_diags_2021.csv") %>% separate(UPDB_DIST_ID, c(NA, "UPDB_DIST_ID"), sep = "_")
+alleGFRs <- read_csv("Y:/IRB_00096551/UDDB_Table_Files_For_Plotting_2021/uddb_egfrs_2021.csv")
+alleGFRs$RESULT_DTM <- as.Date(alleGFRs$RESULT_DTM, format = "%m/%d/%Y")
+allSlopes <- read_csv("Y:/IRB_00096551/UDDB_Table_Files_For_Plotting_2021/Patient_with_Slopes_transposed_5-2021.csv", col_types = "cc")
+allSlopes$Slope <- as.numeric(allSlopes$Slope)
+allACRs <- read_csv("Y:/IRB_00096551/UDDB_Table_Files_For_Plotting_2021/uddb_acrs_2021.csv", col_types = "ccccdc") %>% separate(UPDB_DIST_ID, c(NA, "UPDB_DIST_ID"), sep = "_")
+allACRs$RESULT_DTM <- as.Date(allACRs$RESULT_DTM, format = "%m/%d/%Y")
+ids <- read_csv("Y:/IRB_00096551/UDDB_Table_Files_For_Plotting_2021/uddb_patientID_2021.csv", col_types = "cnccc") %>% separate(UPDB_ID, c(NA, "UPDB_ID"), sep = "_") %>% separate(DIST_ID, c(NA, "DIST_ID"), sep = "_")
+dmTypes <- read_csv("Y:/IRB_00096551/UDDB_Table_Files_For_Plotting_2021/uddb_dmTypes_2021.csv")
+
+# join IDs to the phenotype data
+alleGFRs <- left_join(alleGFRs, ids, by = c("Patient_ID"))
+allACRs <- left_join(allACRs, ids, by = c("Patient_ID"))
+allDiags <- left_join(allDiags, ids, by = c("Patient_ID"))
+allSlopes <- left_join(allSlopes, ids, by = c("Patient_ID"))
+dmTypes <- left_join(dmTypes, ids, by = c("Patient_ID"))
+preparedPed <- left_join(preparedPed, ids[ , c(1,2)], by = c("egoUPDBID" = "PERSON_ID"))
+
+# check if any values are NA. Check how many Patient_IDs contain the string "ID"
+sum(grepl("NA", alleGFRs$Patient_ID))
+sum(is.na(alleGFRs$Patient_ID))
+sum(grepl("NA", allSlopes$Patient_ID))
+sum(is.na(allSlopes$Patient_ID))
+sum(grepl("NA", allDiags$Patient_ID))
+sum(is.na(allDiags$Patient_ID))
+sum(grepl("NA", ids$Patient_ID))
+sum(is.na(ids$Patient_ID))
+sum(grepl("NA", dmTypes$Patient_ID))
+sum(is.na(dmTypes$Patient_ID))
+
+# remove the 427 rows with NA in the Patient_ID in Diags
+allDiags <- allDiags %>% filter(!is.na(Patient_ID))
+
+# only keep data from the HighRisk family
+eGFRHighRisk <- alleGFRs %>% filter(PERSON_ID %in% preparedPed$egoUPDBID)
+ACRHighRisk <- allACRs %>% filter(PERSON_ID %in% preparedPed$egoUPDBID)
+diagsHighRisk <- allDiags %>% filter(PERSON_ID %in% preparedPed$egoUPDBID)
+slopeHighRisk <- allSlopes %>% filter(PERSON_ID %in% preparedPed$egoUPDBID)
+dmTypesHighRisk <- dmTypes %>% filter(PERSON_ID %in% preparedPed$egoUPDBID)
+
+# keep all kidney diagnoses from the HighRisk family and find all individuals whose eGFR ever drops below 15
+kidneyDiagsHighRisk <- diagsHighRisk %>% filter(ICD_CODE %in% c("585.6", "N18.6", "V42.0", "V45.11", "Z94.0", "Z99.2"))
+minEGFRHighRisk <- eGFRHighRisk %>% group_by(Patient_ID, UPDB_ID) %>% summarize(min_egfr = min(EGFR))
+observedEGFRHighRisk <- eGFRHighRisk %>% group_by(Patient_ID) %>% summarize(min_egfr = min(EGFR)) %>% filter(min_egfr <= 15)
+esrdHighRisk <- unique(c(observedEGFRHighRisk$Patient_ID, kidneyDiagsHighRisk$Patient_ID))
+
+# join slopes to HighRisk
+preparedPed <- left_join(preparedPed, slopeHighRisk[ , c(2, 3, 5)], by = c("egoUPDBID" = "PERSON_ID"))
+
+# add other phenotypes to HighRisk
+preparedPed$esrd <- ifelse(preparedPed$Patient_ID %in% esrdHighRisk, "ESRD", NA)
+#preparedPed$NGS <- ifelse(is.na(preparedPed$NGS), NA, "WGS")
+preparedPed$dmType <- ifelse(preparedPed$egoUPDBID %in% dmTypesHighRisk$PERSON_ID, dmTypesHighRisk$FinalType, NA)
+
+lastegfr <- eGFRHighRisk %>% group_by(Patient_ID) %>% summarize(last_egfr = EGFR[which.max(RESULT_DTM)])
+names(lastegfr) <- c("Patient_ID", "last_egfr")
+lastacr <- ACRHighRisk %>% group_by(Patient_ID) %>% summarize(last_acr = OBS_VALUE[which.max(RESULT_DTM)])
+names(lastacr) <- c("Patient_ID", "last_acr")
+
+preparedPed <- left_join(preparedPed, lastegfr, by = "Patient_ID")
+preparedPed <- left_join(preparedPed, lastacr, by = "Patient_ID")
+
+library(kinship2)
+
+preparedPed$rapid_decliner <- ifelse(!is.na(preparedPed$Slope) & preparedPed$Slope <= -5, 1, ifelse(!is.na(preparedPed$esrd), 1, 0))
+#preparedPed$affection <- ifelse(preparedPed$affection == 10, 1, 0)
+#### I changed this line...
+preparedPed <- left_join(preparedPed, minEGFRHighRisk[ , c(1, 3)], by = "Patient_ID")
+#preparedPed$affection <- ifelse(is.na(preparedPed$affection), 0, preparedPed$affection)
+
+preparedPed$deceased[is.na(preparedPed$deceased)] <- "0"
+preparedPed$deceased[(preparedPed$deceased) == "Y"] <- "1"
+#preparedPed$deceased <- ifelse(preparedPed$deceased == "Y", 1, 0)
+
+#pedList <- pedigree(famid = preparedPed$kindredID, id = preparedPed$egoUPDBID, dad = preparedPed$paUPDBID, mom = preparedPed$maUPDBID, sex = preparedPed$sex, status = preparedPed$deceased, affected = preparedPed$rapidDecliner, missid = 0)
+pedList <- pedigree(famid = preparedPed$kindredID, id = preparedPed$egoUPDBID, dad = preparedPed$paUPDBID, mom = preparedPed$maUPDBID, sex = preparedPed$sex, status = preparedPed$deceased, affected = preparedPed$rapid_decliner, missid = 0)
+
+##write_tsv(preparedPed, "~/projects/eGFR/HighRisk/HighRisk_files/HighRisk_kinshipReady.tsv")
+write_tsv(preparedPed, "Z:/temp/HighRisk_kinshipReady_FINAL.tsv")
+```
+
+
+
+``` {r final plotting settings}
+library(FamAgg)
+
+#library(FamAgg)
+#
+#newstuff
+#ped <- read_tsv("~/temp/HighRisk_kinshipReady_FINAL.tsv")
+#preparedPed <- ped[ped$kindredID %in% c(1506, 16366586, 25322898), ]
+#preparedPed <- select(preparedPed, c(1:5))
+#colnames(preparedPed) <- c("family", "id", "father", "mother", "sex")
+#
+#preparedPed$og_id <- preparedPed$id
+#preparedPed$id <- c(1:nrow(preparedPed))
+#uniquePed <- as.data.frame(preparedPed[1:5])
+#
+##preparedPed$id <- paste(preparedPed$family, preparedPed$id, sep = "_")
+#
+#fad <- FAData(pedigree = uniquePed)
+
+ped <- read_tsv("Z:/temp/HighRisk_kinshipReady_FINAL.tsv")
+preparedPed <- ped[ped$kindredID %in% c(1506, 16366586, 41296831, 25322898, 30361650), ]
+preparedPed <- select(preparedPed, c(1:5))
+colnames(preparedPed) <- c("family", "id", "father", "mother", "sex")
+
+preparedPed$id <- paste(preparedPed$family, preparedPed$id, sep = "_")
+
+fad <- FAData(pedigree = preparedPed)
+
+dups <- group_by(preparedPed, id) %>% summarise(count = n())
+kindred <- group_by(ped, kindredID) %>% summarise(count = n())
+
+x <- "175031"
+
+fullInfo <- preparedPed %>% filter(kindredID == x)
+
+#fullInfo$color <- ifelse(is.na(fullInfo$UPDB_ID) & is.na(fullInfo$Dist_ID), 1,
+# 1 = black
+# 2 = red
+# 3 = green
+# 4 = blue
+#fullInfo$color <- ifelse(is.na(fullInfo$Patient_ID), 1,
+#                     ifelse(!is.na(fullInfo$UPDB_ID) & !is.na(fullInfo$Dist_ID), 3, 
+#                            ifelse(!is.na(fullInfo$UPDB_ID) & is.na(fullInfo$Dist_ID), 4,
+#                                   ifelse(is.na(fullInfo$UPDB_ID) & !is.na(fullInfo$Dist_ID), 2,5))))
+
+fullInfo$color <- ifelse(is.na(fullInfo$dmType), 1,
+                         ifelse(grepl("T2D", fullInfo$dmType) | grepl("T3D", fullInfo$dmType), 2,
+                                ifelse(grepl("T1D", fullInfo$dmType), 4, 5)))
+                         
+pedigree <- pedList[as.character(x)]
+pdf(paste0("Z:/temp/drawn_peds/annotated_", x, "_high_risk.pdf"), width = 60, height = 12)
+#pdf(paste0("~/projects/eGFR/HighRisk/annotated_", x, "_fras1.pdf"), width = 24, height = 12)
+
+# this might need to change
+#listOfIds <- ifelse(is.na(fullInfo$Slope) & is.na(fullInfo$dmType) & fullInfo$Study_ID != "FS180003", 
+listOfIds <- ifelse(is.na(fullInfo$Patient_ID), 
+                  "", 
+                  paste0(fullInfo$egoUPDBID, "\n", fullInfo$DIST_ID, "\n",
+                         fullInfo$dmType, "\n", fullInfo$min_egfr, "\n", fullInfo$last_egfr, "\n", 
+                         fullInfo$last_acr, "\n", fullInfo$Slope, "\n", fullInfo$esrd, "\n"))
+                  #paste0(fullInfo$UPDB_ID, "\n", fullInfo$Dist_ID, "\n", fullInfo$Study_ID, "\n", 
+                  #       fullInfo$dmType, "\n", fullInfo$min_egfr, "\n", fullInfo$last_egfr, "\n", 
+                  #       fullInfo$last_acr, "\n", fullInfo$Slope, "\n", fullInfo$esrd, "\n", fullInfo$NGS))
+
+plot.pedigree(pedigree, id = listOfIds, col = fullInfo$color, affected = fullInfo$rapid_decliner, cex = 0.5, symbolsize = 1.75)
+
+mtext(paste0("Family ", x), line = 2, adj = 0, cex = 2.5)
+
+dev.off()
+```
